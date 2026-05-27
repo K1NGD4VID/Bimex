@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import { parsearError } from "../utils/errores.js";
 import {
   contribuir as contribuirContrato,
   retirarPrincipal as retirarPrincipalContrato,
+  retiroAnticipado as retiroAnticipadoContrato,
   reclamarYield as reclamarYieldContrato,
   abandonarProyecto as abandonarProyectoContrato,
   solicitarContinuar as solicitarContinuarContrato,
   obtenerAportacion,
   calcularYield,
-  calcularYieldDetallado,
   obtenerProyecto,
   obtenerBalanceMXNe,
   mxneAStroops,
@@ -15,15 +17,13 @@ import {
   CONFIG,
 } from "../stellar/contrato";
 
-// ─── Config de estados ────────────────────────────────────────────────────────
 const ESTADO_CONFIG = {
-  EtapaInicial: { label: "Etapa inicial",  clase: "badge-muted",  icono: "🌱" },
-  EnProgreso:   { label: "● En progreso",  clase: "badge-teal",   icono: "🚀" },
-  Abandonado:   { label: "Abandonado",     clase: "badge-red",    icono: "⚠️" },
-  Liberado:     { label: "✓ Liberado",     clase: "badge-amber",  icono: "🏆" },
+  EtapaInicial: { labelKey: "status.EtapaInicial", clase: "badge-muted" },
+  EnProgreso:   { labelKey: "status.EnProgreso",   clase: "badge-teal" },
+  Abandonado:   { labelKey: "status.Abandonado",   clase: "badge-red" },
+  Liberado:     { labelKey: "status.Liberado",     clase: "badge-amber" },
 };
 
-// Calcula el yield estimado del dueño usando dual-yield (CETES + AMM)
 function estimarYieldDueno(proyecto) {
   if (!proyecto?.timestamp_inicio || !proyecto?.aportado) return BigInt(0);
   const ahora = Math.floor(Date.now() / 1000);
@@ -39,146 +39,191 @@ function estimarYieldDueno(proyecto) {
   return yieldCetes + yieldAmm;
 }
 
-// Calcula el desglose de yield
-function estimarYieldDetallado(proyecto) {
-  if (!proyecto?.timestamp_inicio || !proyecto?.aportado) {
-    return { cetes: BigInt(0), amm: BigInt(0), total: BigInt(0) };
-  }
-  const ahora = Math.floor(Date.now() / 1000);
-  const segundos = Math.max(0, ahora - proyecto.timestamp_inicio);
-  const minutos = BigInt(Math.floor(segundos / 60));
-  const cetesCap = BigInt(proyecto.capital_en_cetes ?? 0);
-  const ammCap   = BigInt(proyecto.capital_en_amm   ?? 0);
-  const cetesBps = BigInt(CONFIG.YIELD_CETES_BPS);
-  const ammBps   = BigInt(CONFIG.YIELD_AMM_BPS);
-  const MINUTOS_ANO = BigInt(525_600);
-  const cetes = (cetesCap * cetesBps * minutos) / BigInt(10_000) / MINUTOS_ANO;
-  const amm   = (ammCap   * ammBps   * minutos) / BigInt(10_000) / MINUTOS_ANO;
-  return { cetes, amm, total: cetes + amm };
+function calcProyeccion(cantidadMXNe, meses, modo) {
+  const capital = Number(cantidadMXNe) || 0;
+  const tasaInversor = modo === "inversor" ? 0.05 : 0;
+  const tasaProyecto = modo === "inversor" ? 0.06 : 0.11;
+  const fraccion = meses / 12;
+  return {
+    tuYield:        capital * tasaInversor * fraccion,
+    proyectoRecibe: capital * tasaProyecto * fraccion,
+    totalRetiras:   capital + capital * tasaInversor * fraccion,
+  };
 }
 
-export default function DetalleProyecto({ proyecto: proyectoInicial, direccion, onCerrar }) {
-  const [proyecto, setProyecto] = useState(proyectoInicial);
-  const [cantidad, setCantidad] = useState("");
-  const [cargando, setCargando] = useState(false);
-  const [vista, setVista] = useState("info");
-  const [toast, setToast] = useState(null);
-  const [miAportacion, setMiAportacion] = useState(BigInt(0));
-  const [miYield, setMiYield] = useState(BigInt(0));
-  const [confirmarAbandonar, setConfirmarAbandonar] = useState(false);
-  const [balanceMXNe, setBalanceMXNe] = useState(BigInt(0));
-  const modalRef = useRef(null);
-  const botonAbrioRef = useRef(document.activeElement);
+function fmt(n) {
+  return n.toLocaleString("es-MX", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
 
-  const estado = proyecto.estado ?? "EtapaInicial";
+// SVG icons
+const IconArrowLeft = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+    <line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" />
+  </svg>
+);
+const IconFile = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
+  </svg>
+);
+const IconShield = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+  </svg>
+);
+
+// ── Skeleton components ───────────────────────────────────────────────────────
+function SkeletonDetailLeft() {
+  return (
+    <div className="detail-main" aria-hidden="true" style={{ pointerEvents: 'none', userSelect: 'none' }}>
+      <div className="detail-header">
+        <div className="skeleton" style={{ height: 22, width: 100, marginBottom: 12 }} />
+        <div className="skeleton" style={{ height: 28, width: '65%' }} />
+      </div>
+      <div className="detail-section" style={{ marginTop: 28 }}>
+        <div className="skeleton" style={{ height: 14, width: 120, marginBottom: 14 }} />
+        <div className="info-grid">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="info-cell" style={{ background: 'var(--card)' }}>
+              <div className="skeleton" style={{ height: 12, width: '50%', marginBottom: 6 }} />
+              <div className="skeleton" style={{ height: 18, width: '40%' }} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SkeletonInvestPanel() {
+  return (
+    <div className="invest-panel" aria-hidden="true" style={{ pointerEvents: 'none', userSelect: 'none' }}>
+      <div className="invest-panel-head">
+        <div className="skeleton" style={{ height: 14, width: '40%', marginBottom: 8, background: 'linear-gradient(90deg, rgba(255,255,255,0.08) 25%, rgba(255,255,255,0.20) 50%, rgba(255,255,255,0.08) 75%)', backgroundSize: '200% 100%' }} />
+        <div className="skeleton" style={{ height: 18, width: '60%', background: 'linear-gradient(90deg, rgba(255,255,255,0.08) 25%, rgba(255,255,255,0.20) 50%, rgba(255,255,255,0.08) 75%)', backgroundSize: '200% 100%' }} />
+      </div>
+      <div className="invest-body">
+        <div className="skeleton" style={{ height: 14, width: '30%', marginBottom: 8 }} />
+        <div className="skeleton" style={{ height: 6, borderRadius: 99, marginBottom: 16 }} />
+        <div className="skeleton" style={{ height: 40, borderRadius: 6, marginBottom: 12 }} />
+        <div className="skeleton" style={{ height: 40, borderRadius: 6, marginBottom: 16 }} />
+        <div className="skeleton" style={{ height: 44, borderRadius: 6 }} />
+      </div>
+    </div>
+  );
+}
+
+export default function DetalleProyecto({ proyecto: proyectoInicial, direccion, onCerrar, onError, onToast }) {
+  const { t } = useTranslation();
+  const montadoRef = useRef(true);
+  useEffect(() => () => { montadoRef.current = false; }, []);
+  const [proyecto,          setProyecto]          = useState(proyectoInicial);
+  const [cantidad,          setCantidad]          = useState("");
+  const [cargando,          setCargando]          = useState(false);
+  const [cargandoInicial,   setCargandoInicial]   = useState(true);
+  const [modoInversion,     setModoInversion]     = useState("inversor");
+  const [vistaRetirar,      setVistaRetirar]      = useState(false);
+  const [confirmarAbandonar,setConfirmarAbandonar]= useState(false);
+  const [miAportacion,      setMiAportacion]      = useState(BigInt(0));
+  const [miYield,           setMiYield]           = useState(BigInt(0));
+  const [balanceMXNe,       setBalanceMXNe]       = useState(null);
+
+  const estado    = proyecto.estado ?? "EtapaInicial";
   const estadoCfg = ESTADO_CONFIG[estado] ?? ESTADO_CONFIG.EtapaInicial;
-  const esDueno = direccion === proyecto.dueno;
+  const esDueno      = direccion === proyecto.dueno;
   const esAbandonado = estado === "Abandonado";
   const aceptaFondos = estado === "EtapaInicial" || estado === "EnProgreso";
 
-  const aportado = Number(proyecto.aportado ?? 0);
-  const meta = Number(proyecto.meta ?? 0);
+  const ahora = Math.floor(Date.now() / 1000);
+  const tsVencimiento = proyecto.timestamp_vencimiento ?? 0;
+  const plazoVencido  = tsVencimiento > 0 && ahora >= tsVencimiento;
+  const fechaVencimiento = tsVencimiento > 0
+    ? new Date(tsVencimiento * 1000).toLocaleDateString("es-MX", { year: "numeric", month: "short", day: "numeric" })
+    : null;
+
+  const aportado   = Number(proyecto.aportado ?? 0);
+  const meta       = Number(proyecto.meta ?? 0);
   const porcentaje = meta > 0 ? Math.min((aportado / meta) * 100, 100) : 0;
 
-  const yieldDuenoEstimado = esDueno ? estimarYieldDueno(proyecto) : BigInt(0);
-  const yieldDetallado = esDueno ? estimarYieldDetallado(proyecto) : null;
+  const yieldDueno = esDueno ? estimarYieldDueno(proyecto) : BigInt(0);
 
-  // Carga datos del usuario y refresca el proyecto desde la red
+  // Documentos IPFS: "CID1|CID2|CID3" → array
+  const DOC_LABELS = [
+    t("detalle.docINE"),
+    t("detalle.docPlan"),
+    t("detalle.docPresupuesto"),
+  ];
+  const docs = proyecto.doc_hash
+    ? proyecto.doc_hash.split("|").filter(Boolean)
+    : [];
+
   const refrescar = useCallback(async () => {
-    if (!direccion || proyecto.id == null) return;
+    if (!direccion || proyecto.id == null) {
+      setCargandoInicial(false);
+      return;
+    }
     try {
       const [proyActualizado, aport, yld, bal] = await Promise.all([
         obtenerProyecto(proyecto.id).catch(() => null),
         obtenerAportacion(proyecto.id, direccion).catch(() => BigInt(0)),
         calcularYield(proyecto.id, direccion).catch(() => BigInt(0)),
-        obtenerBalanceMXNe(direccion).catch(() => BigInt(0)),
+        obtenerBalanceMXNe(direccion).catch(() => null),
       ]);
+      if (!montadoRef.current) return;
       if (proyActualizado) setProyecto(proyActualizado);
       setMiAportacion(aport);
       setMiYield(yld);
       setBalanceMXNe(bal);
-    } catch { /* ignore */ }
-  }, [proyecto.id, direccion]);
+    } catch (e) {
+      if (montadoRef.current) onError?.(parsearError(e));
+    } finally {
+      setCargandoInicial(false);
+    }
+  }, [proyecto.id, direccion, onError, setCargandoInicial]);
 
   useEffect(() => { refrescar(); }, [refrescar]);
 
-  // Focus trap + Escape para cerrar
+  // Escape → volver
   useEffect(() => {
-    const modal = modalRef.current;
-    if (!modal) return;
-
-    // Mueve el foco al modal al abrir
-    modal.focus();
-
-    // Cierra con Escape
-    function onKeyDown(e) {
-      if (e.key === "Escape") { onCerrar(); return; }
-      if (e.key !== "Tab") return;
-
-      // Trap: mantén el foco dentro del modal
-      const focusables = modal.querySelectorAll(
-        'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      const primero = focusables[0];
-      const ultimo  = focusables[focusables.length - 1];
-
-      if (e.shiftKey) {
-        if (document.activeElement === primero) { e.preventDefault(); ultimo.focus(); }
-      } else {
-        if (document.activeElement === ultimo)  { e.preventDefault(); primero.focus(); }
-      }
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      // Devuelve el foco al elemento que abrió el modal
-      botonAbrioRef.current?.focus?.();
-    };
+    function onKey(e) { if (e.key === "Escape") onCerrar(); }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, [onCerrar]);
 
-  function mostrarToast(msg, tipo = "success") {
-    setToast({ msg, tipo });
-    setTimeout(() => setToast(null), 4500);
-  }
-
   function mensajeCorto(err) {
-    const msg = err?.message || "Error inesperado.";
-    // Trunca mensajes técnicos largos del contrato
-    if (msg.includes("HostError") || msg.includes("XDR") || msg.length > 120) {
-      return "Error en el contrato. Intenta de nuevo en unos segundos.";
-    }
+    const msg = err?.message || t("detalle.errContract");
+    if (msg.includes("HostError") || msg.includes("XDR") || msg.length > 120) return t("detalle.errContract");
     return msg;
   }
 
-  // Bug 1 & 2: normaliza el valor del input — bloquea negativos y notación científica
   function handleCantidadChange(e) {
     const raw = e.target.value;
-    // Rechaza notación científica (e/E) y signos
     if (/[eE+\-]/.test(raw)) return;
     setCantidad(raw);
   }
 
-  const cantidadNum = Number(cantidad);
+  const cantidadNum    = Number(cantidad);
   const cantidadValida = cantidad !== "" && !isNaN(cantidadNum) && cantidadNum > 0;
-  const superaBalance = cantidadValida && mxneAStroops(cantidadNum) > balanceMXNe;
-  const errorCantidad = !cantidadValida && cantidad !== ""
-    ? "Ingresa una cantidad mayor a 0"
+  const superaBalance  = cantidadValida && balanceMXNe !== null && mxneAStroops(cantidadNum) > balanceMXNe;
+  const errorCantidad  = !cantidadValida && cantidad !== ""
+    ? t("detalle.errAmount")
     : superaBalance
-    ? `Saldo insuficiente — tienes ${stroopsAMXNe(balanceMXNe)} disponibles`
+    ? t("detalle.errBalance", { balance: stroopsAMXNe(balanceMXNe) })
     : null;
+
+  const proyeccion = calcProyeccion(cantidadNum, 12, modoInversion);
 
   async function manejarContribuir() {
     if (!cantidadValida || superaBalance) return;
     setCargando(true);
     try {
       await contribuirContrato(direccion, proyecto.id, mxneAStroops(Number(cantidad)));
-      mostrarToast(`✅ Contribuiste $${cantidad} MXNe al proyecto`);
+      onToast?.(t("detalle.toastContributed", { amount: cantidad }));
       setCantidad("");
-      setVista("info");
       await refrescar();
     } catch (err) {
-      mostrarToast(mensajeCorto(err), "error");
+      onError?.(err);
     }
     setCargando(false);
   }
@@ -187,34 +232,27 @@ export default function DetalleProyecto({ proyecto: proyectoInicial, direccion, 
     setCargando(true);
     try {
       await retirarPrincipalContrato(direccion, proyecto.id);
-      mostrarToast(`✅ Retiraste ${stroopsAMXNe(miAportacion)} a tu wallet`);
+      onToast?.(t("detalle.toastWithdrawn", { amount: stroopsAMXNe(miAportacion) }));
       setMiAportacion(BigInt(0));
       setMiYield(BigInt(0));
-      setVista("info");
+      setVistaRetirar(false);
       await refrescar();
     } catch (err) {
-      mostrarToast(mensajeCorto(err), "error");
+      onError?.(err);
     }
     setCargando(false);
   }
 
   async function manejarReclamarYield() {
-    if (estado !== "Liberado") {
-      mostrarToast("El yield solo se puede reclamar cuando el proyecto está liberado (meta alcanzada).", "error");
-      return;
-    }
-    if (yieldDuenoEstimado === BigInt(0)) {
-      mostrarToast("Aún no hay yield acumulado. Espera al menos 1 minuto.", "error");
-      return;
-    }
+    if (estado !== "Liberado") { onError?.(t("detalle.errYieldOnly")); return; }
+    if (miYield === BigInt(0)) { onError?.(t("detalle.errNoYield")); return; }
     setCargando(true);
     try {
       await reclamarYieldContrato(direccion, proyecto.id);
-      mostrarToast("✅ Yield reclamado y enviado a tu wallet");
-      setVista("info");
+      onToast?.(t("detalle.toastYield"));
       await refrescar();
     } catch (err) {
-      mostrarToast(mensajeCorto(err), "error");
+      onError?.(err);
     }
     setCargando(false);
   }
@@ -224,10 +262,24 @@ export default function DetalleProyecto({ proyecto: proyectoInicial, direccion, 
     setCargando(true);
     try {
       await abandonarProyectoContrato(direccion, proyecto.id);
-      mostrarToast("Proyecto marcado como abandonado");
+      onToast?.(t("detalle.toastAbandoned"));
       await refrescar();
     } catch (err) {
-      mostrarToast(mensajeCorto(err), "error");
+      onError?.(err);
+    }
+    setCargando(false);
+  }
+
+  async function manejarRetiroAnticipado() {
+    setCargando(true);
+    try {
+      await retiroAnticipadoContrato(direccion, proyecto.id);
+      onToast?.(t("detalle.toastWithdrawn", { amount: stroopsAMXNe(miAportacion) }));
+      setMiAportacion(BigInt(0));
+      setMiYield(BigInt(0));
+      await refrescar();
+    } catch (err) {
+      onError?.(err);
     }
     setCargando(false);
   }
@@ -236,475 +288,434 @@ export default function DetalleProyecto({ proyecto: proyectoInicial, direccion, 
     setCargando(true);
     try {
       await solicitarContinuarContrato(direccion, proyecto.id);
-      mostrarToast("¡Ahora eres el nuevo responsable del proyecto!");
+      onToast?.(t("detalle.toastContinued"));
       await refrescar();
     } catch (err) {
-      mostrarToast(mensajeCorto(err), "error");
+      onError?.(err);
     }
     setCargando(false);
   }
 
   return (
     <>
-      <div
-        className="modal-overlay"
-        onClick={onCerrar}
-        role="presentation"
-        aria-hidden="false"
-      >
-        <div
-          className="modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="modal-titulo"
-          style={{ maxWidth: "520px" }}
-          onClick={(e) => e.stopPropagation()}
-          ref={modalRef}
-          tabIndex={-1}
-        >
+      <div className="detail-page">
 
-          {/* Header */}
-          <div className="modal-header">
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <span style={estilos.emoji}>{estadoCfg.icono}</span>
-              <div>
-                <h2 id="modal-titulo" style={{ fontSize: "1.15rem" }}>{proyecto.nombre}</h2>
-                <span className={`badge ${estadoCfg.clase}`} style={{ marginTop: "4px" }}>
-                  {estadoCfg.label}
+        {/* Back link */}
+        <button className="back-link" onClick={onCerrar}>
+          <IconArrowLeft />
+          {t("detalle.backToProjects")}
+        </button>
+
+        {/* 2-column grid */}
+        <div className="detail-grid">
+
+          {cargandoInicial ? (
+            <>
+              <SkeletonDetailLeft />
+              <SkeletonInvestPanel />
+            </>
+          ) : (
+            <>
+
+          {/* ── LEFT: Project info ── */}
+          <div className="detail-main">
+
+            {/* Header */}
+            <div className="detail-header">
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+                <span className={`badge ${estadoCfg.clase}`}>
+                  <span className="badge-dot" />
+                  {t(estadoCfg.labelKey)}
                 </span>
               </div>
+              <h1>{proyecto.nombre}</h1>
             </div>
-            <button className="btn-close" onClick={onCerrar} aria-label="Cerrar detalle del proyecto">×</button>
+
+            {/* Banners de estado */}
+            {esAbandonado && (
+              <div className="detail-banner detail-banner--red">
+                <IconShield />
+                <span>{t("detalle.abandonedBanner")}</span>
+              </div>
+            )}
+            {estado === "Liberado" && (
+              <div className="detail-banner detail-banner--amber">
+                <IconShield />
+                <span>{t("detalle.releasedBanner")}</span>
+              </div>
+            )}
+
+            {/* Info grid */}
+            <div className="detail-section">
+              <h3>{t("detalle.projectInfo")}</h3>
+              <div className="info-grid">
+                <div className="info-cell">
+                  <label>{t("detalle.goal")}</label>
+                  <span>{stroopsAMXNe(proyecto.meta ?? 0)}</span>
+                </div>
+                <div className="info-cell">
+                  <label>{t("detalle.raised")}</label>
+                  <span className="green">{stroopsAMXNe(proyecto.aportado ?? 0)}</span>
+                </div>
+                <div className="info-cell">
+                  <label>{t("detalle.yieldDelivered")}</label>
+                  <span>{stroopsAMXNe(proyecto.yield_entregado ?? 0)}</span>
+                </div>
+                <div className="info-cell">
+                  <label>{t("detalle.owner")}</label>
+                  <span style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>
+                    {proyecto.dueno ? `${proyecto.dueno.slice(0, 6)}…${proyecto.dueno.slice(-4)}` : "—"}
+                  </span>
+                </div>
+                {esDueno && BigInt(proyecto.aportado ?? 0) > BigInt(0) && (
+                  <div className="info-cell" style={{ gridColumn: "1 / -1" }}>
+                    <label>{t("detalle.yieldAvailable")}</label>
+                    <span className="green" style={{ fontFamily: "monospace", fontSize: "1.1rem" }}>
+                      {stroopsAMXNe(yieldDueno)}
+                    </span>
+                  </div>
+                )}
+                {fechaVencimiento && (
+                  <div className="info-cell" style={{ gridColumn: "1 / -1" }}>
+                    <label>{t("detalle.deadline")}</label>
+                    <span style={{ fontFamily: "monospace", fontSize: "0.9rem", color: plazoVencido ? "var(--error)" : "var(--text)" }}>
+                      {fechaVencimiento}
+                      {plazoVencido && <span style={{ marginLeft: 8, fontSize: "0.78rem", color: "var(--error)", fontWeight: 600 }}>{t("detalle.expired")}</span>}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Distribución del rendimiento */}
+            <div className="detail-section">
+              <h3>{t("detalle.yieldSplit")}</h3>
+              <div className="split-table">
+                <div className="split-row">
+                  <span className="split-name" style={{ color: "var(--green)", fontWeight: 600 }}>{t("detalle.splitProject")}</span>
+                  <div className="split-bar-wrap" role="progressbar" aria-valuenow={45} aria-valuemin={0} aria-valuemax={100} aria-valuetext="6.00%"><div className="split-bar" style={{ width: "44.6%", background: "var(--green)" }} /></div>
+                  <span className="split-pct" style={{ color: "var(--green)" }}>6.00%</span>
+                </div>
+                <div className="split-row">
+                  <span className="split-name" style={{ color: "var(--navy)", fontWeight: 600 }}>{t("detalle.splitInvestor")}</span>
+                  <div className="split-bar-wrap" role="progressbar" aria-valuenow={37} aria-valuemin={0} aria-valuemax={100} aria-valuetext="5.00%"><div className="split-bar" style={{ width: "37.2%", background: "var(--navy)" }} /></div>
+                  <span className="split-pct" style={{ color: "var(--navy)" }}>5.00%</span>
+                </div>
+                <div className="split-row" style={{ background: "var(--bg)" }}>
+                  <span className="split-name" style={{ color: "var(--muted)" }}>{t("detalle.splitPlatform")}</span>
+                  <div className="split-bar-wrap" role="progressbar" aria-valuenow={18} aria-valuemin={0} aria-valuemax={100} aria-valuetext="2.45%"><div className="split-bar" style={{ width: "18.2%", background: "var(--subtle)" }} /></div>
+                  <span className="split-pct" style={{ color: "var(--muted)" }}>2.45%</span>
+                </div>
+                <div style={{ padding: "12px 18px", background: "var(--bg)", borderTop: "2px solid var(--border)", display: "flex", justifyContent: "space-between", fontSize: "0.82rem" }}>
+                  <span style={{ color: "var(--muted)", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em" }}>{t("detalle.totalYield")}</span>
+                  <strong style={{ color: "var(--text)" }}>13.45% {t("detalle.perYear")}</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* Documentos IPFS */}
+            {docs.length > 0 && (
+              <div className="detail-section">
+                <h3>{t("detalle.verifiedDocs")}</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {docs.map((cid, i) => (
+                    <div key={cid} className="doc-row">
+                      <span style={{ color: "var(--muted)" }}><IconFile /></span>
+                      <span style={{ fontSize: "0.85rem", flex: 1 }}>{DOC_LABELS[i] ?? `Documento ${i + 1}`}</span>
+                      <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontFamily: "monospace" }}>
+                        IPFS: {cid.slice(0, 8)}…
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Acciones del dueño (izquierda, secundarias) */}
+            {esDueno && aceptaFondos && (
+              <div className="detail-section">
+                {!confirmarAbandonar ? (
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: "0.82rem", color: "var(--muted)" }}
+                    onClick={() => setConfirmarAbandonar(true)}
+                    disabled={cargando}
+                  >
+                    {t("detalle.abandon")}
+                  </button>
+                ) : (
+                  <div className="confirm-box confirm-box--red">
+                    <p style={{ fontSize: "0.85rem", color: "#B91C1C", fontWeight: 600, marginBottom: 12 }}>
+                      {t("detalle.abandonConfirm")}
+                    </p>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setConfirmarAbandonar(false)}>
+                        {t("detalle.cancel")}
+                      </button>
+                      <button
+                        className="btn"
+                        style={{ flex: 1, justifyContent: "center", background: "#DC2626", color: "#fff" }}
+                        onClick={manejarAbandonar}
+                        disabled={cargando}
+                      >
+                        {cargando ? t("detalle.processing") : t("detalle.confirmAbandon")}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Badge de verificación documental */}
-          {proyecto.doc_hash && (
-            <div style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "6px",
-              background: "rgba(5,150,105,0.07)",
-              border: "1px solid rgba(5,150,105,0.20)",
-              borderRadius: "var(--radius-sm)",
-              padding: "7px 12px",
-              marginTop: "10px",
-              fontSize: "0.76rem",
-              color: "#059669",
-              fontWeight: 600,
-            }}>
-              <span>🔒</span>
-              <span>Documentos verificados en blockchain</span>
-              <code style={{ fontFamily: "'DM Mono'", fontSize: "0.67rem", opacity: 0.75, marginLeft: "4px" }}>
-                {Array.from(proyecto.doc_hash).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 8)}…
-              </code>
-            </div>
-          )}
-
-          {/* Banner abandonado */}
-          {esAbandonado && (
-            <div style={estilos.bannerAbandonado}>
-              <span>⚠️</span>
-              <span style={{ fontSize: "0.82rem" }}>
-                Este proyecto fue abandonado. Puedes tomar el control y continuarlo.
-              </span>
-            </div>
-          )}
-
-          {/* Banner liberado */}
-          {estado === "Liberado" && (
-            <div style={estilos.bannerLiberado}>
-              <span>🏆</span>
-              <span style={{ fontSize: "0.82rem" }}>
-                ¡Meta alcanzada! Lo que metiste, ya lo puedes sacar.
-              </span>
-            </div>
-          )}
-
-          {/* Barra de progreso */}
-          <div style={{ margin: "20px 0" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
-              <span style={{ fontSize: "0.8rem", color: "var(--muted)" }} id="progreso-label">
-                Progreso de financiamiento
-              </span>
-              <span style={{ fontSize: "0.8rem", color: "var(--primary)", fontFamily: "'DM Mono'", fontWeight: 700 }}
-                    aria-hidden="true">
-                {porcentaje.toFixed(0)}%
-              </span>
-            </div>
-            <div
-              className="progress-track"
-              role="progressbar"
-              aria-valuenow={Math.round(porcentaje)}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-labelledby="progreso-label"
-              aria-valuetext={`${porcentaje.toFixed(0)}% del objetivo alcanzado`}
-            >
-              <div className="progress-fill" style={{ width: `${porcentaje}%` }} />
-            </div>
-          </div>
-
-          {/* Stats */}
-          <div style={estilos.statsGrid}>
-            <StatBox label="Total bloqueado" valor={stroopsAMXNe(proyecto.aportado ?? 0)} color="var(--text)" />
-            <StatBox label="Meta"            valor={stroopsAMXNe(proyecto.meta ?? 0)}     color="var(--muted)" />
-            <StatBox label="Yield entregado" valor={stroopsAMXNe(proyecto.yield_entregado ?? 0)} color="var(--amber)" />
-          </div>
-
-          {/* Yield detallado del dueño — Capa 1 CETES + Capa 2 AMM */}
-          {esDueno && !esAbandonado && BigInt(proyecto.aportado ?? 0) > BigInt(0) && yieldDetallado && (
-            <div style={estilos.yieldDuenoBanner}>
-              <div style={{ fontSize: "0.75rem", color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "10px" }}>
-                💰 Yield disponible para reclamar
+          {/* ── RIGHT: Invest panel ── */}
+          <div>
+            <div className="invest-panel">
+              <div className="invest-panel-head">
+                <p>{t("detalle.investIn")}</p>
+                <h3>{proyecto.nombre}</h3>
               </div>
-              <div style={{ fontFamily: "'DM Mono'", fontSize: "1.5rem", color: "var(--amber)", fontWeight: 700, marginBottom: "10px" }}>
-                {stroopsAMXNe(yieldDuenoEstimado)}
-              </div>
-              {/* Desglose por capa */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
-                <div style={estilos.yieldCapa}>
-                  <div style={{ fontSize: "0.68rem", color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                    🏦 Capa 1 · CETES
-                  </div>
-                  <div style={{ fontFamily: "'DM Mono'", fontSize: "0.85rem", color: "#059669", fontWeight: 700, marginTop: "2px" }}>
-                    +{stroopsAMXNe(yieldDetallado.cetes)}
-                  </div>
-                  <div style={{ fontSize: "0.66rem", color: "var(--muted)" }}>vía Etherfuse</div>
-                </div>
-                <div style={estilos.yieldCapa}>
-                  <div style={{ fontSize: "0.68rem", color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                    🌊 Capa 2 · AMM
-                  </div>
-                  <div style={{ fontFamily: "'DM Mono'", fontSize: "0.85rem", color: "#7C3AED", fontWeight: 700, marginTop: "2px" }}>
-                    +{stroopsAMXNe(yieldDetallado.amm)}
-                  </div>
-                  <div style={{ fontSize: "0.66rem", color: "var(--muted)" }}>vía Stellar AMM</div>
-                </div>
-              </div>
-              <div style={{ fontSize: "0.72rem", color: "var(--muted)", textAlign: "center" }}>
-                Capital: {stroopsAMXNe(proyecto.capital_en_cetes ?? 0)} CETES + {stroopsAMXNe(proyecto.capital_en_amm ?? 0)} AMM
-              </div>
-            </div>
-          )}
 
-          {/* Mi posición (backer) */}
-          {miAportacion > BigInt(0) && (
-            <div style={estilos.miPosicion}>
-              <p style={{ fontSize: "0.78rem", color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "12px" }}>
-                Mi posición
-              </p>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <div>
-                  <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Tu capital aportado</div>
-                  <div style={{ fontFamily: "'DM Mono'", color: "var(--primary)", fontSize: "1.1rem" }}>
-                    {stroopsAMXNe(miAportacion)}
+              <div className="invest-body">
+
+                {/* Barra de progreso */}
+                <div className="progress-section">
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82rem" }}>
+                    <span style={{ color: "var(--muted)" }}>{t("detalle.raised")}</span>
+                    <span>
+                      <strong style={{ color: "var(--text)" }}>{stroopsAMXNe(proyecto.aportado ?? 0)}</strong>
+                      {" / "}
+                      {stroopsAMXNe(proyecto.meta ?? 0)}
+                    </span>
+                  </div>
+                  <div
+                    className="progress-section__bar"
+                    role="progressbar"
+                    aria-valuenow={Math.round(porcentaje)}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuetext={`${porcentaje.toFixed(0)}%`}
+                  >
+                    <div className="progress-section__fill" style={{ width: `${porcentaje}%` }} />
+                  </div>
+                  <div className="progress-meta">
+                    <span>{porcentaje.toFixed(0)}% {t("detalle.completed")}</span>
                   </div>
                 </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Yield acumulado (mi parte)</div>
-                  <div style={{ fontFamily: "'DM Mono'", color: "var(--amber)", fontSize: "1.1rem" }}>
-                    +{stroopsAMXNe(miYield)}
+
+                {/* Mi posición (si ya contribuí) */}
+                {miAportacion > BigInt(0) && (
+                  <div className="my-position">
+                    <div style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: 10 }}>
+                      {t("detalle.myPosition")}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <div>
+                        <div style={{ fontSize: "0.78rem", color: "var(--muted)" }}>{t("detalle.myCapital")}</div>
+                        <div style={{ fontFamily: "monospace", fontWeight: 700, color: "var(--navy)", fontSize: "1rem" }}>
+                          {stroopsAMXNe(miAportacion)}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: "0.78rem", color: "var(--muted)" }}>{t("detalle.myYield")}</div>
+                        <div style={{ fontFamily: "monospace", fontWeight: 700, color: "var(--green)", fontSize: "1rem" }}>
+                          +{stroopsAMXNe(miYield)}
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-            </div>
-          )}
+                )}
 
-          {/* ── Botones principales (vista info) ── */}
-          {vista === "info" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "20px" }}>
-
-              {/* Fila principal de acciones */}
-              <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-
-                {/* Contribuir */}
+                {/* Forma de contribuir */}
                 {aceptaFondos && (
-                  <button
-                    className="btn btn-primary"
-                    style={{ flex: 1, minWidth: "140px", justifyContent: "center" }}
-                    onClick={() => setVista("contribuir")}
-                    disabled={cargando}
-                  >
-                    💰 Contribuir
-                  </button>
+                  <>
+                    <div style={{ fontSize: "0.78rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: 8 }}>
+                      {t("detalle.mode")}
+                    </div>
+                    <div className="mode-selector">
+                      <button
+                        className={`mode-btn${modoInversion === "inversor" ? " active" : ""}`}
+                        onClick={() => setModoInversion("inversor")}
+                        aria-pressed={modoInversion === "inversor"}
+                      >
+                        <h4>{t("detalle.modeInversor")}</h4>
+                        <p>{t("detalle.modeInversorDesc")}</p>
+                      </button>
+                      <button
+                        className={`mode-btn${modoInversion === "mecenas" ? " active" : ""}`}
+                        onClick={() => setModoInversion("mecenas")}
+                        aria-pressed={modoInversion === "mecenas"}
+                      >
+                        <h4>{t("detalle.modeMecenas")}</h4>
+                        <p>{t("detalle.modeMecenasDesc")}</p>
+                      </button>
+                    </div>
+
+                    <div className="input-group">
+                      <label>{t("detalle.contributeLabel")}</label>
+                      <div className={`input-wrap${errorCantidad ? " input-wrap--error" : ""}`}>
+                        <span className="input-prefix">MXNe</span>
+                        <input
+                          type="number"
+                          value={cantidad}
+                          onChange={handleCantidadChange}
+                          onKeyDown={(e) => { if (["e","E","+","-"].includes(e.key)) e.preventDefault(); }}
+                          placeholder={t("detalle.contributePlaceholder")}
+                          min="1"
+                          step="1"
+                        />
+                      </div>
+                      {errorCantidad && (
+                        <p style={{ fontSize: "0.78rem", color: "var(--error)", marginTop: 6, fontWeight: 600 }}>
+                          {errorCantidad}
+                        </p>
+                      )}
+                      {cantidadValida && !superaBalance && balanceMXNe !== null && (
+                        <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: 5 }}>
+                          {t("detalle.available")}: {stroopsAMXNe(balanceMXNe)}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Calculadora */}
+                    <div className="calc-result">
+                      <div className="calc-row">
+                        <span>{t("detalle.calcCapital")}</span>
+                        <strong>${fmt(cantidadNum || 0)} MXN</strong>
+                      </div>
+                      <div className="calc-row">
+                        <span>{t("detalle.calcYield", { pct: modoInversion === "inversor" ? "5%" : "0%" })}</span>
+                        <strong style={{ color: "var(--navy)" }}>
+                          ${fmt(proyeccion.tuYield)} MXN
+                        </strong>
+                      </div>
+                      <div className="calc-row">
+                        <span>{t("detalle.calcProject")}</span>
+                        <strong style={{ color: "var(--green)" }}>
+                          ${fmt(proyeccion.proyectoRecibe)} MXN
+                        </strong>
+                      </div>
+                      <div className="calc-row total" style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+                        <span>{t("detalle.calcTotal")}</span>
+                        <strong>${fmt(proyeccion.totalRetiras)} MXN</strong>
+                      </div>
+                    </div>
+
+                    <button
+                      className="invest-btn"
+                      onClick={manejarContribuir}
+                      disabled={cargando || !cantidadValida || !!errorCantidad}
+                    >
+                      {cargando ? t("detalle.processing") : t("detalle.confirmContribute")}
+                    </button>
+                    <div className="invest-note">
+                      {t("detalle.safetyMsg")}
+                    </div>
+                  </>
                 )}
 
-                {/* Retirar principal — solo cuando Liberado o Abandonado */}
-                {miAportacion > BigInt(0) && (estado === "Liberado" || estado === "Abandonado") && (
-                  <button
-                    className="btn btn-amber"
-                    style={{ flex: 1, minWidth: "140px", justifyContent: "center" }}
-                    onClick={() => setVista("retirar")}
-                    disabled={cargando}
-                  >
-                    🔓 Retirar principal
-                  </button>
-                )}
-
-                {/* Principal bloqueado — aviso mientras está activo */}
+                {/* Capital bloqueado o retiro anticipado disponible */}
                 {miAportacion > BigInt(0) && (estado === "EtapaInicial" || estado === "EnProgreso") && (
-                  <div style={{ flex: 1, minWidth: "140px", background: "var(--primary-dim)", border: "1.5px solid rgba(124,58,237,0.16)", borderRadius: "var(--radius-sm)", padding: "10px 14px", fontSize: "0.78rem", color: "var(--primary)", textAlign: "center", lineHeight: 1.4 }}>
-                    🔒 Principal bloqueado<br/>
-                    <span style={{ color: "var(--muted)", fontSize: "0.72rem" }}>Disponible al liberar el proyecto</span>
-                  </div>
+                  plazoVencido ? (
+                    <div className="detail-banner detail-banner--amber" style={{ marginTop: 8 }}>
+                      <IconShield />
+                      <span>{t("detalle.expiredBanner")}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="locked-notice">
+                        <IconShield />
+                        <span>{t("detalle.locked")}</span>
+                      </div>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ width: "100%", justifyContent: "center", marginTop: 8, fontSize: "0.82rem", color: "var(--muted)" }}
+                        onClick={manejarRetiroAnticipado}
+                        disabled={cargando}
+                        title={t("detalle.earlyWithdrawTitle")}
+                      >
+                        {cargando ? t("detalle.processing") : t("detalle.earlyWithdraw")}
+                      </button>
+                      <p style={{ fontSize: "0.72rem", color: "var(--muted)", textAlign: "center", marginTop: 4 }}>
+                        {t("detalle.earlyWithdrawNote")}
+                      </p>
+                    </>
+                  )
                 )}
 
-                {/* Reclamar yield — dueño con fondos */}
-                {esDueno && !esAbandonado && BigInt(proyecto.aportado ?? 0) > BigInt(0) && (
+                {/* Retirar capital */}
+                {miAportacion > BigInt(0) && (estado === "Liberado" || estado === "Abandonado") && (
+                  <>
+                    {!vistaRetirar ? (
+                      <button
+                        className="btn btn-amber"
+                        style={{ width: "100%", justifyContent: "center", marginTop: aceptaFondos ? 0 : 4 }}
+                        onClick={() => setVistaRetirar(true)}
+                        disabled={cargando}
+                      >
+                        {t("detalle.withdraw")}
+                      </button>
+                    ) : (
+                      <div className="withdraw-confirm">
+                        <div style={{ textAlign: "center", marginBottom: 14 }}>
+                          <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginBottom: 4 }}>{t("detalle.youWillReceive")}</div>
+                          <div style={{ fontFamily: "monospace", fontSize: "1.5rem", fontWeight: 700, color: "var(--navy)" }}>
+                            {stroopsAMXNe(miAportacion)}
+                          </div>
+                          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: 4 }}>{t("detalle.exactAmount")}</div>
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setVistaRetirar(false)}>
+                            {t("detalle.cancel")}
+                          </button>
+                          <button
+                            className="btn btn-amber"
+                            style={{ flex: 2, justifyContent: "center" }}
+                            onClick={manejarRetirar}
+                            disabled={cargando}
+                          >
+                            {cargando ? t("detalle.processing") : t("detalle.confirmWithdraw")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Reclamar yield (dueño, solo cuando proyecto liberado) */}
+                {esDueno && estado === "Liberado" && BigInt(proyecto.aportado ?? 0) > BigInt(0) && (
                   <button
-                    className="btn btn-amber"
-                    style={{ flex: 1, minWidth: "140px", justifyContent: "center" }}
+                    className="btn btn-secondary"
+                    style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
                     onClick={manejarReclamarYield}
-                    disabled={cargando || yieldDuenoEstimado === BigInt(0)}
-                    title={yieldDuenoEstimado === BigInt(0) ? "Espera al menos 1 minuto" : ""}
+                    disabled={cargando || miYield === BigInt(0)}
+                    title={miYield === BigInt(0) ? t("detalle.waitYield") : ""}
                   >
-                    {cargando ? "Procesando…" : "🏦 Reclamar yield"}
+                    {cargando ? t("detalle.processing") : t("detalle.claimYield")}
                   </button>
                 )}
 
-                {/* Solicitar continuar — cualquiera en proyectos abandonados */}
+                {/* Tomar control (proyecto abandonado, no eres dueño) */}
                 {esAbandonado && !esDueno && (
                   <button
-                    className="btn btn-primary"
-                    style={{ flex: 1, minWidth: "180px", justifyContent: "center" }}
+                    className="invest-btn"
+                    style={{ marginTop: 8 }}
                     onClick={manejarSolicitarContinuar}
                     disabled={cargando}
                   >
-                    {cargando ? "Procesando…" : "🤝 Tomar control"}
+                    {cargando ? t("detalle.processing") : t("detalle.takeControl")}
                   </button>
                 )}
-              </div>
 
-              {/* Abandonar — botón separado abajo, menos prominente */}
-              {esDueno && aceptaFondos && !confirmarAbandonar && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ justifyContent: "center", color: "var(--muted)", fontSize: "0.8rem" }}
-                  onClick={() => setConfirmarAbandonar(true)}
-                  disabled={cargando}
-                >
-                  Abandonar proyecto
-                </button>
-              )}
-
-              {/* Confirmación de abandono */}
-              {confirmarAbandonar && (
-                <div style={estilos.confirmarAbandonar}>
-                  <p style={{ fontSize: "0.85rem", color: "#B91C1C", fontWeight: 600, marginBottom: "12px" }}>
-                    ⚠️ ¿Seguro que quieres abandonar este proyecto? Esta acción permite que cualquiera tome el control.
-                  </p>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setConfirmarAbandonar(false)}>
-                      Cancelar
-                    </button>
-                    <button
-                      className="btn"
-                      style={{ flex: 1, justifyContent: "center", background: "#DC2626", color: "#fff" }}
-                      onClick={manejarAbandonar}
-                      disabled={cargando}
-                    >
-                      {cargando ? "Procesando…" : "Sí, abandonar"}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ── Vista: Contribuir ── */}
-          {vista === "contribuir" && (
-            <div style={{ marginTop: "20px" }}>
-              <div className="campo">
-                <label>Cantidad a aportar (MXNe)</label>
-                <input
-                  className="input"
-                  type="number"
-                  value={cantidad}
-                  onChange={handleCantidadChange}
-                  onKeyDown={(e) => { if (["e","E","+","-"].includes(e.key)) e.preventDefault(); }}
-                  placeholder="Ej. 100"
-                  min="1"
-                  step="1"
-                  autoFocus
-                  style={{ borderColor: errorCantidad ? "var(--error)" : undefined }}
-                />
-                {errorCantidad && (
-                  <p style={{ fontSize: "0.78rem", color: "var(--error)", marginTop: "6px", fontWeight: 600 }}>
-                    ⚠ {errorCantidad}
-                  </p>
-                )}
-                {cantidadValida && !superaBalance && (
-                  <p style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "6px" }}>
-                    Disponible: {stroopsAMXNe(balanceMXNe)} MXNe
-                  </p>
-                )}
-              </div>
-
-              <div style={estilos.infoBanner}>
-                <span>🛡️</span>
-                <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
-                  <strong style={{ color: "var(--text)" }}>${cantidad || "X"} MXNe</strong> entran al contrato,
-                  no a nuestras manos. Lo que metes, lo sacas cuando el proyecto termina. El yield es el extra que va al creador.
-                </span>
-              </div>
-
-              <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
-                <button className="btn btn-ghost" onClick={() => setVista("info")} style={{ flex: 1 }}>← Atrás</button>
-                <button
-                  className="btn btn-primary"
-                  onClick={manejarContribuir}
-                  disabled={cargando || !cantidadValida || !!errorCantidad}
-                  style={{ flex: 2, justifyContent: "center" }}
-                >
-                  {cargando ? "Procesando…" : "Confirmar aporte"}
-                </button>
               </div>
             </div>
-          )}
+          </div>
 
-          {/* ── Vista: Retirar ── */}
-          {vista === "retirar" && (
-            <div style={{ marginTop: "20px" }}>
-              <div style={estilos.retiroCard}>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "4px" }}>Recibirás en tu wallet</div>
-                <div style={{ fontFamily: "'DM Mono'", fontSize: "1.8rem", color: "var(--primary)", fontWeight: 700 }}>
-                  {stroopsAMXNe(miAportacion)}
-                </div>
-                <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "4px" }}>
-                  Exacto lo que metiste — ni un peso de menos
-                </div>
-              </div>
-
-              <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
-                <button className="btn btn-ghost" onClick={() => setVista("info")} style={{ flex: 1 }}>← Atrás</button>
-                <button
-                  className="btn btn-amber"
-                  onClick={manejarRetirar}
-                  disabled={cargando}
-                  style={{ flex: 2, justifyContent: "center" }}
-                >
-                  {cargando ? "Procesando…" : "Confirmar retiro"}
-                </button>
-              </div>
-            </div>
+            </>
           )}
 
         </div>
       </div>
 
-      {toast && (
-        <div
-          className={`toast ${toast.tipo}`}
-          role={toast.tipo === "error" ? "alert" : "status"}
-          aria-live={toast.tipo === "error" ? "assertive" : "polite"}
-          aria-atomic="true"
-        >
-          {toast.msg}
-        </div>
-      )}
     </>
   );
 }
-
-function StatBox({ label, valor, color }) {
-  return (
-    <div style={estilos.statBox}>
-      <div style={{ fontSize: "0.72rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>
-        {label}
-      </div>
-      <div style={{ fontFamily: "'DM Mono'", fontSize: "1rem", color, marginTop: "4px" }}>
-        {valor}
-      </div>
-    </div>
-  );
-}
-
-const estilos = {
-  emoji: {
-    fontSize: "2rem",
-    background: "var(--primary-dim)",
-    borderRadius: "10px",
-    padding: "8px 10px",
-    lineHeight: 1,
-  },
-  bannerAbandonado: {
-    display: "flex",
-    gap: "10px",
-    alignItems: "flex-start",
-    background: "rgba(220,38,38,0.05)",
-    border: "1px solid rgba(220,38,38,0.18)",
-    borderRadius: "var(--radius-sm)",
-    padding: "12px",
-    marginTop: "12px",
-    color: "#B91C1C",
-    fontSize: "0.82rem",
-  },
-  bannerLiberado: {
-    display: "flex",
-    gap: "10px",
-    alignItems: "flex-start",
-    background: "rgba(217,119,6,0.06)",
-    border: "1px solid rgba(217,119,6,0.22)",
-    borderRadius: "var(--radius-sm)",
-    padding: "12px",
-    marginTop: "12px",
-    color: "#B45309",
-    fontSize: "0.82rem",
-  },
-  statsGrid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr 1fr",
-    gap: "12px",
-  },
-  statBox: {
-    background: "var(--bg)",
-    border: "1.5px solid var(--border-soft)",
-    borderRadius: "var(--radius-sm)",
-    padding: "12px",
-    textAlign: "center",
-  },
-  yieldDuenoBanner: {
-    background: "rgba(217,119,6,0.06)",
-    border: "1.5px solid rgba(217,119,6,0.20)",
-    borderRadius: "var(--radius-sm)",
-    padding: "14px 16px",
-    marginTop: "14px",
-    textAlign: "center",
-  },
-  yieldCapa: {
-    background: "#fff",
-    border: "1px solid rgba(0,0,0,0.07)",
-    borderRadius: "var(--radius-sm)",
-    padding: "8px 10px",
-    textAlign: "center",
-  },
-  miPosicion: {
-    background: "var(--primary-dim)",
-    border: "1.5px solid rgba(124,58,237,0.16)",
-    borderRadius: "var(--radius-sm)",
-    padding: "16px",
-    marginTop: "16px",
-  },
-  infoBanner: {
-    display: "flex",
-    gap: "8px",
-    alignItems: "flex-start",
-    background: "var(--bg)",
-    border: "1.5px solid var(--border-soft)",
-    borderRadius: "var(--radius-sm)",
-    padding: "12px",
-  },
-  retiroCard: {
-    background: "var(--primary-dim)",
-    border: "1.5px solid rgba(124,58,237,0.18)",
-    borderRadius: "var(--radius)",
-    padding: "24px",
-    textAlign: "center",
-  },
-  confirmarAbandonar: {
-    background: "rgba(220,38,38,0.04)",
-    border: "1.5px solid rgba(220,38,38,0.20)",
-    borderRadius: "var(--radius-sm)",
-    padding: "14px",
-  },
-};

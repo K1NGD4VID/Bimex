@@ -8,19 +8,28 @@ import {
   Keypair,
   nativeToScVal,
   scValToNative,
-  xdr,
 } from "@stellar/stellar-sdk";
 import { signTransaction } from "@stellar/freighter-api";
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
+const _network = import.meta.env.VITE_NETWORK ?? "testnet";
+const _isMainnet = _network === "mainnet";
+
 export const CONFIG = {
-  CONTRACT_ID: (import.meta.env.VITE_CONTRACT_ID ?? "CAEYEIIH4MHXDVEBAPNGV2LJ7DAO4JSVBIN3E3I6TBK56AMRWERNRM3B").trim(),
+  CONTRACT_ID: (import.meta.env.VITE_CONTRACT_ID ?? "CC5WJJMGXIGJLDTAM4F5WFA6PHREJP2ARB5Y5IGZJKIWYCFJ36SDD43J").trim(),
   RPC_URL: import.meta.env.VITE_RPC_URL ?? "https://soroban-testnet.stellar.org",
-  NETWORK_PASSPHRASE: Networks.TESTNET,
-  TOKEN_MXNE: import.meta.env.VITE_TOKEN_MXNE ?? "CDDIGHPVTW4PSCQCU67NQ4NXZ4NX5GDLNL3O67WT5RQ4GT6RXIEYPC4P",
-  YIELD_CETES_BPS: 5000000,  // tasa demo Capa 1 — ~10 MXNe/min por 16K
-  YIELD_AMM_BPS:   2000000,  // tasa demo Capa 2
+  NETWORK_PASSPHRASE: _isMainnet ? Networks.PUBLIC : Networks.TESTNET,
+  NETWORK: _network,
+  TOKEN_MXNE: import.meta.env.VITE_TOKEN_MXNE ?? (
+    _isMainnet
+      ? "CAPW7JXJ6H6SGJ5MVM25356FAYOVT3ICZUIZRT4KGZHLUNMTWNMUI3RM"  // MXNe Mainnet (issuer: brale.xyz)
+      : "CDDIGHPVTW4PSCQCU67NQ4NXZ4NX5GDLNL3O67WT5RQ4GT6RXIEYPC4P"  // MXNe Testnet
+  ),
+  // Tasas reales en producción (bps): 945 = 9.45% CETES, 400 = 4% AMM
+  // Tasas demo en testnet: 5000000 / 2000000 (~10 MXNe/min por 16K)
+  YIELD_CETES_BPS: _isMainnet ? 945 : 5000000,
+  YIELD_AMM_BPS:   _isMainnet ? 400 : 2000000,
 };
 
 // ─── Servidor RPC ─────────────────────────────────────────────────────────────
@@ -156,12 +165,9 @@ export async function obtenerBalanceMXNe(direccion) {
 
 export async function obtenerTotalProyectos() {
   try {
-    console.log("[Bimex] llamando total_proyectos en contrato:", CONFIG.CONTRACT_ID);
     const total = await simularLectura("total_proyectos", []);
-    console.log("[Bimex] total_proyectos respuesta:", total);
     return Number(total);
-  } catch (e) {
-    console.error("[Bimex] Error en total_proyectos:", e);
+  } catch {
     return 0;
   }
 }
@@ -182,6 +188,7 @@ function decodificarEstado(rawEstado) {
   if (nombre === "EnProgreso")  return "EnProgreso";
   if (nombre === "EnRevision")  return "EnRevision";
   if (nombre === "Rechazado")   return "Rechazado";
+  if (nombre === "EtapaInicial") return "EtapaInicial";
   return "EtapaInicial";
 }
 
@@ -189,15 +196,6 @@ export async function obtenerProyecto(id) {
   const raw = await simularLectura("obtener_proyecto", [
     nativeToScVal(id, { type: "u32" }),
   ]);
-
-  // doc_hash viene como Buffer/Uint8Array desde scValToNative para BytesN<32>
-  let docHash = null;
-  if (raw.doc_hash) {
-    const bytes = raw.doc_hash instanceof Uint8Array ? raw.doc_hash : new Uint8Array(Object.values(raw.doc_hash));
-    // Si todos son cero es un hash vacío (proyecto demo sin docs)
-    const esTodosCero = bytes.every(b => b === 0);
-    docHash = esTodosCero ? null : bytes;
-  }
 
   return {
     id: Number(id),
@@ -208,13 +206,15 @@ export async function obtenerProyecto(id) {
     yield_entregado: BigInt(raw.yield_entregado ?? 0),
     estado: decodificarEstado(raw.estado),
     timestamp_inicio: Number(raw.timestamp_inicio ?? 0),
+    timestamp_vencimiento: Number(raw.timestamp_vencimiento ?? 0),
+    tiempo_meses: Number(raw.tiempo_meses ?? 0),
     // Dual-yield
     capital_en_cetes: BigInt(raw.capital_en_cetes ?? 0),
     capital_en_amm: BigInt(raw.capital_en_amm ?? 0),
     yield_cetes_acumulado: BigInt(raw.yield_cetes_acumulado ?? 0),
     yield_amm_acumulado: BigInt(raw.yield_amm_acumulado ?? 0),
-    // Verificación documental
-    doc_hash: docHash,  // Uint8Array(32) si tiene documentos, null si no
+    // Verificación documental — CID de IPFS (string) o null si vacío
+    doc_hash: raw.doc_cid?.toString() || null,
     // Admin
     motivo_rechazo: raw.motivo_rechazo?.toString() ?? "",
   };
@@ -286,15 +286,21 @@ export async function obtenerTodosLosProyectos() {
 
 // ─── Funciones de ESCRITURA ───────────────────────────────────────────────────
 
-export async function crearProyecto(direccion, nombre, metaMXNe, docHashBytes) {
-  // docHashBytes debe ser Uint8Array(32) generado por hashearDocumentos()
-  const docHashScVal = xdr.ScVal.scvBytes(Buffer.from(docHashBytes));
-
+export async function crearProyecto(direccion, nombre, metaMXNe, docCid, tiempoMeses) {
   const tx = await construirTx(direccion, "crear_proyecto", [
     dirAScVal(direccion),
     nativeToScVal(nombre, { type: "string" }),
     nativeToScVal(metaMXNe, { type: "i128" }),
-    docHashScVal,
+    nativeToScVal(docCid, { type: "string" }),
+    nativeToScVal(Number(tiempoMeses), { type: "u32" }),
+  ]);
+  return firmarYEnviar(tx, direccion);
+}
+
+export async function retiroAnticipado(direccion, idProyecto) {
+  const tx = await construirTx(direccion, "retiro_anticipado", [
+    dirAScVal(direccion),
+    nativeToScVal(idProyecto, { type: "u32" }),
   ]);
   return firmarYEnviar(tx, direccion);
 }
@@ -353,13 +359,18 @@ export async function reclamarYield(direccion, idProyecto) {
   return firmarYEnviar(tx, direccion);
 }
 
-// ─── Faucet — solo testnet ────────────────────────────────────────────────────
+// ─── Faucet — TESTNET ONLY — do not call on Mainnet ──────────────────────────
 
 /**
  * Mintea 100 MXNe de prueba a la dirección indicada.
  * Firma con la clave de faucet (solo testnet, clave en .env.local).
+ * WARNING: This function must NOT be exposed in the production UI.
  */
 export async function mintearMXNePrueba(direccionDestino) {
+  if (CONFIG.NETWORK_PASSPHRASE !== Networks.TESTNET) {
+    throw new Error("mintearMXNePrueba solo está disponible en Testnet.");
+  }
+
   const secretFaucet = import.meta.env.VITE_FAUCET_SECRET;
   if (!secretFaucet) throw new Error("Faucet no configurado (VITE_FAUCET_SECRET)");
 
@@ -433,7 +444,8 @@ export async function hashearDocumentos(ine, plan, presupuesto) {
 // ─── Helpers de formato ───────────────────────────────────────────────────────
 
 export function stroopsAMXNe(stroops) {
-  const valor = Number(BigInt(stroops)) / 10_000_000;
+  const b = typeof stroops === "bigint" ? stroops : BigInt(stroops ?? 0);
+  const valor = Number(b / BigInt(10_000_000)) + Number(b % BigInt(10_000_000)) / 10_000_000;
   return `${valor.toLocaleString("es-MX", { minimumFractionDigits: 2 })} MXNe`;
 }
 
