@@ -1,17 +1,13 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { createClient } from "@supabase/supabase-js";
 import { parsearError } from "../utils/errores.js";
+import { supabase } from "../utils/supabase.js";
 import {
   obtenerTodosLosProyectos,
   obtenerAportacion,
   calcularYield,
   stroopsAMXNe,
 } from "../stellar/contrato";
-
-const supabase = import.meta.env.VITE_SUPABASE_URL
-  ? createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY)
-  : null;
 
 // ─── Config de estado ─────────────────────────────────────────────────────────
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { obtenerTodosLosProyectos, stroopsAMXNe } from "../stellar/contrato";
 import { parsearError } from "../utils/errores.js";
+import { supabase } from "../utils/supabase.js";
 
 export default function ListaProyectos({ onSeleccionar, onCrear, refrescar }) {
   const { t } = useTranslation();
@@ -41,15 +42,13 @@ export default function ListaProyectos({ onSeleccionar, onCrear, refrescar }) {
   useEffect(() => { setVisibles(12); }, [filtro]);
 
   useEffect(() => {
-    const url = import.meta.env.VITE_INDEXER_URL;
-    if (!url) return;
-    const es = new EventSource(`${url}/sse`);
-    const recargar = () => cargar();
-    es.addEventListener('proyecto_actualizado', recargar);
-    es.addEventListener('nueva_contribucion', recargar);
-    es.addEventListener('yield_reclamado', recargar);
-    es.onerror = () => es.close();
-    return () => es.close();
+    if (!supabase) return;
+    const channel = supabase
+      .channel('bimex-proyectos')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'proyectos' }, () => cargar())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'aportaciones' }, () => cargar())
+      .subscribe();
+    return () => supabase.removeChannel(channel);
   }, []);
 
   const proyectosPublicos = proyectos.filter(p => !ESTADOS_OCULTOS.has(p.estado));
