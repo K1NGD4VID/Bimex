@@ -278,7 +278,21 @@
     "filterLabel": "Filter by status:",
     "funding": "Funding",
     "goal": "Goal",
-    "locked": "Locked"
+    "locked": "Locked",
+    "contributionsTitle": "Contributions history",
+    "colProject": "Project",
+    "colContributor": "Contributor",
+    "colAmount": "Amount",
+    "colWhen": "When"
+  },
+
+  "pagination": {
+    "aria": "Pagination",
+    "prev": "Previous",
+    "next": "Next",
+    "pageOf": "Page {{page}} of {{total}}",
+    "prevAria": "Previous page",
+    "nextAria": "Next page"
   },
   "footer": {
     "terms": "Terms",
