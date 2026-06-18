@@ -2,8 +2,20 @@
 .env
 .env.local
 .env.*.local
+.env.production.local
 *.pem
 *.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+secrets.json
+credentials.json
+service-account*.json
+*.wallet
+*.seed
+mnemonic*.txt
 
 # ===== NODE =====
 node_modules/
