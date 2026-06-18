@@ -50,12 +50,12 @@ export default function OnboardingTour({ isActive, onComplete }) {
       let targetElement = null;
       try {
         targetElement = document.querySelector(step.target);
-      } catch (_) {}
+      } catch { /* selector inválido — se ignora */ }
 
       if (!targetElement && step.fallback) {
         try {
           targetElement = document.querySelector(step.fallback);
-        } catch (_) {}
+        } catch { /* selector inválido — se ignora */ }
       }
 
       if (!targetElement) return;
@@ -131,7 +131,7 @@ export default function OnboardingTour({ isActive, onComplete }) {
         el.style.zIndex = "";
         el.style.boxShadow = "";
       }
-    } catch (_) {}
+    } catch { /* selector inválido — se ignora */ }
   };
 
   const handleNext = () => {

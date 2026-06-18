@@ -283,7 +283,25 @@
     "colProject": "Proyecto",
     "colContributor": "Contribuidor",
     "colAmount": "Monto",
-    "colWhen": "Fecha"
+    "colWhen": "Fecha",
+    "viewContract": "Ver el contrato en Stellar Explorer",
+    "viewAccount": "Ver cuenta en Stellar Explorer"
+  },
+
+  "simulador": {
+    "sectionLabel": "Simula tu impacto",
+    "title": "¿Cuánto genera tu aporte?",
+    "subtitle": "Mueve los controles y mira lo que tu capital puede lograr — sin perderlo.",
+    "amountLabel": "Tu aporte",
+    "monthsLabel": "Plazo del proyecto",
+    "months": "{{count}} meses",
+    "youContribute": "Aportas hoy",
+    "youContributeSub": "Protegido en el smart contract",
+    "projectGets": "El proyecto recibe",
+    "projectGetsSub": "Rendimiento del {{pct}} anual",
+    "youRecover": "Recuperas al cierre",
+    "youRecoverSub": "Incluye +${{amount}} de rendimiento ({{pct}} anual)",
+    "disclaimer": "Cálculo ilustrativo basado en la distribución objetivo del rendimiento (CETES vía Etherfuse + AMM Stellar). Las tasas son variables; tu capital aportado siempre es 100% recuperable."
   },
 
   "pagination": {

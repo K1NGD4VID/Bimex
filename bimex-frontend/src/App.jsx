@@ -10,6 +10,7 @@ import Changelog        from "./components/Changelog";
 import Terminos         from "./components/Terminos";
 import Privacidad       from "./components/Privacidad";
 import OnboardingTour from "./components/OnboardingTour";
+import SimuladorImpacto from "./components/SimuladorImpacto";
 import { shouldShowTour } from "./utils/onboardingUtils";
 import { getStorage }   from "./utils/storage";
 import { parsearError } from "./utils/errores";
@@ -815,6 +816,18 @@ function Landing({ autoConectar, onConectado, onTransparencia, onChangelog, onTe
             </span>
           </div>
         )}
+      </section>
+
+      {/* Simulador de impacto */}
+      <section aria-labelledby="simulador-titulo" className="landing-section" style={{ padding: "64px 40px", background: "var(--card)", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ maxWidth: 1120, margin: "0 auto" }}>
+          <div style={{ marginBottom: 32 }}>
+            <div style={st.sectionLabel}>{t("simulador.sectionLabel")}</div>
+            <h2 id="simulador-titulo" style={st.sectionH2}>{t("simulador.title")}</h2>
+            <p style={st.sectionSub}>{t("simulador.subtitle")}</p>
+          </div>
+          <SimuladorImpacto />
+        </div>
       </section>
 
       {/* Features */}

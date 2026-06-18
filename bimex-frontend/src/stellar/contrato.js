@@ -33,6 +33,11 @@ export const CONFIG = {
   YIELD_AMM_BPS:   _isMainnet ? 400 : 2000000,
 };
 
+// URL pública en stellar.expert para verificar contratos, cuentas o transacciones
+export function urlExplorer(tipo, valor) {
+  return `https://stellar.expert/explorer/${_isMainnet ? "public" : "testnet"}/${tipo}/${valor}`;
+}
+
 // ─── Servidor RPC ─────────────────────────────────────────────────────────────
 
 const servidor = new rpc.Server(CONFIG.RPC_URL, { allowHttp: false });

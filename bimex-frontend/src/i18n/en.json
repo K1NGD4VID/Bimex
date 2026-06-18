@@ -283,7 +283,25 @@
     "colProject": "Project",
     "colContributor": "Contributor",
     "colAmount": "Amount",
-    "colWhen": "When"
+    "colWhen": "When",
+    "viewContract": "View the contract on Stellar Explorer",
+    "viewAccount": "View account on Stellar Explorer"
+  },
+
+  "simulador": {
+    "sectionLabel": "Simulate your impact",
+    "title": "How much does your contribution generate?",
+    "subtitle": "Move the sliders and see what your capital can achieve — without losing it.",
+    "amountLabel": "Your contribution",
+    "monthsLabel": "Project duration",
+    "months": "{{count}} months",
+    "youContribute": "You contribute today",
+    "youContributeSub": "Protected by the smart contract",
+    "projectGets": "The project receives",
+    "projectGetsSub": "{{pct}} annual yield",
+    "youRecover": "You recover at close",
+    "youRecoverSub": "Includes +${{amount}} yield ({{pct}} annual)",
+    "disclaimer": "Illustrative calculation based on the target yield distribution (CETES via Etherfuse + Stellar AMM). Rates are variable; your contributed capital is always 100% recoverable."
   },
 
   "pagination": {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { obtenerTodosLosProyectos, calcularYieldDetallado, stroopsAMXNe } from "../stellar/contrato";
+import { obtenerTodosLosProyectos, calcularYieldDetallado, stroopsAMXNe, urlExplorer, CONFIG } from "../stellar/contrato";
 import { parsearError } from "../utils/errores.js";
 import { createClient } from "@supabase/supabase-js";
 import usePaginacion from "../hooks/usePaginacion";
@@ -145,7 +145,15 @@ export default function Transparencia({ onVolver }) {
         </svg>
         <p style={{ fontSize: "0.86rem", color: "var(--muted)", lineHeight: 1.6, margin: 0 }}>
           <strong style={{ color: "var(--text2)" }}>{t("transp.infoTitle")}</strong>{" "}
-          {t("transp.infoDesc")}
+          {t("transp.infoDesc")}{" "}
+          <a
+            href={urlExplorer("contract", CONFIG.CONTRACT_ID)}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "var(--navy)", fontWeight: 600, whiteSpace: "nowrap" }}
+          >
+            {t("transp.viewContract")} ↗
+          </a>
         </p>
       </div>
 
@@ -309,7 +317,17 @@ export default function Transparencia({ onVolver }) {
                       return (
                         <tr key={`${r.proyecto_id}_${r.contribuidor}_${r.timestamp}`}>
                           <td style={{ padding: 12 }}>{proyecto.nombre}</td>
-                          <td style={{ padding: 12, fontFamily: "monospace" }}>{r.contribuidor}</td>
+                          <td style={{ padding: 12, fontFamily: "monospace" }}>
+                            <a
+                              href={urlExplorer("account", r.contribuidor)}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={`${t("transp.viewAccount")}: ${r.contribuidor}`}
+                              style={{ color: "var(--navy)", textDecoration: "none", fontWeight: 600, whiteSpace: "nowrap" }}
+                            >
+                              {r.contribuidor ? `${r.contribuidor.slice(0, 5)}…${r.contribuidor.slice(-4)}` : "—"} ↗
+                            </a>
+                          </td>
                           <td style={{ padding: 12, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{stroopsAMXNe(r.monto)}</td>
                           <td style={{ padding: 12, textAlign: "right" }}>{r.timestamp ? new Date(r.timestamp).toLocaleString() : "—"}</td>
                         </tr>

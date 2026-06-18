@@ -20,6 +20,7 @@ import {
   CONFIG,
 } from "../stellar/contrato";
 import { aplicarMeta, crearMetaProyecto, DEFAULT_META } from "../utils/metaTags.js";
+import { calcProyeccion } from "../utils/rendimiento.js";
 
 const ESTADO_CONFIG = {
   EtapaInicial: { labelKey: "status.EtapaInicial", clase: "badge-muted" },
@@ -41,18 +42,6 @@ function estimarYieldDueno(proyecto) {
   const yieldCetes = (cetesCap * cetesBps * minutos) / BigInt(10_000) / MINUTOS_ANO;
   const yieldAmm   = (ammCap   * ammBps   * minutos) / BigInt(10_000) / MINUTOS_ANO;
   return yieldCetes + yieldAmm;
-}
-
-function calcProyeccion(cantidadMXNe, meses, modo) {
-  const capital = Number(cantidadMXNe) || 0;
-  const tasaInversor = modo === "inversor" ? 0.05 : 0;
-  const tasaProyecto = modo === "inversor" ? 0.06 : 0.11;
-  const fraccion = meses / 12;
-  return {
-    tuYield:        capital * tasaInversor * fraccion,
-    proyectoRecibe: capital * tasaProyecto * fraccion,
-    totalRetiras:   capital + capital * tasaInversor * fraccion,
-  };
 }
 
 function fmt(n) {
