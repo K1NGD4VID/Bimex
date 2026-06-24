@@ -1,4 +1,3 @@
-import { esDireccionValida } from "../utils/stellar.js";
 import {
   Contract,
   rpc,
