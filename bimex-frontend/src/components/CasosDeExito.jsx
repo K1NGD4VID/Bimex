@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { createClient } from "@supabase/supabase-js";
-import { stroopsAMXNe, urlExplorer } from "../stellar/contrato";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
@@ -14,15 +13,6 @@ const supabase = supabaseUrl && supabaseAnonKey && !supabaseUrl.includes("placeh
 function fmtMXNe(stroops) {
   const mxne = Number(stroops) / 10_000_000;
   return mxne.toLocaleString("es-MX", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
-}
-
-function fmtFecha(iso) {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleDateString("es-MX", { year: "numeric", month: "short", day: "numeric" });
-  } catch {
-    return "—";
-  }
 }
 
 function SkeletonCard() {
