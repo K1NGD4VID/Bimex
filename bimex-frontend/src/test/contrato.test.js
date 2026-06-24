@@ -19,6 +19,10 @@ vi.mock('@stellar/stellar-sdk', () => ({
   scValToNative: vi.fn(),
 }));
 
+vi.mock('passkey-kit', () => ({
+  PasskeyKit: vi.fn(),
+}));
+
 vi.mock('@stellar/freighter-api', () => ({
   signTransaction: vi.fn(),
   isConnected: vi.fn(),
