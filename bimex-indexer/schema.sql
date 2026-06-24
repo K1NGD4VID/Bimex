@@ -72,3 +72,18 @@ create policy "Allow insert only" on audit_log for insert with check (true);
 create index if not exists idx_audit_log_block_time on audit_log (block_time desc);
 create index if not exists idx_audit_log_actor_address on audit_log (actor_address);
 create index if not exists idx_audit_log_action on audit_log (action);
+
+-- Success Stories Evidence
+create table if not exists proyecto_evidencia (
+  id bigserial primary key,
+  proyecto_id integer references proyectos(id) on delete cascade,
+  tipo text not null default 'foto',
+  titulo text not null default '',
+  descripcion text default '',
+  url text not null,
+  cid text default '',
+  uploaded_at timestamptz default now()
+);
+
+create index if not exists idx_evidencia_proyecto on proyecto_evidencia (proyecto_id);
+create index if not exists idx_evidencia_tipo on proyecto_evidencia (tipo);

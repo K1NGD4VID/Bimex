@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
+import { createClient } from "@supabase/supabase-js";
 import { crearThrottle } from "../utils/throttle.js";
 import { parsearError } from "../utils/errores.js";
 import { QRCodeSVG } from "qrcode.react";
+import { validarArchivo, subirAIPFS } from "../utils/ipfs.js";
 import {
   contribuir as contribuirContrato,
   retirarPrincipal as retirarPrincipalContrato,
@@ -17,10 +19,19 @@ import {
   obtenerBalanceMXNe,
   mxneAStroops,
   stroopsAMXNe,
+  urlExplorer,
   CONFIG,
 } from "../stellar/contrato";
 import { aplicarMeta, crearMetaProyecto, DEFAULT_META } from "../utils/metaTags.js";
 import { calcProyeccion, TASAS } from "../utils/rendimiento.js";
+
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const ADMIN_ADDRESS = import.meta.env.VITE_ADMIN_ADDRESS ?? "GD2FLYXZMEGSSYZGC4LKFGCH6SOZR57UB64ECPEEJ4IEKAT6VZU3SLGS";
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
+const supabase = supabaseUrl && supabaseAnonKey && !supabaseUrl.includes("placeholder.supabase.co") && supabaseAnonKey !== "placeholder"
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
 
 function calcMonthlyProjectLoss(aportacionStroops, modo = "inversor") {
   const mxne = Number(stroopsAMXNe(aportacionStroops)) || 0;
@@ -57,6 +68,20 @@ function estimarYieldDueno(proyecto) {
 
 function fmt(n) {
   return n.toLocaleString("es-MX", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+function fmtMXNe(stroops) {
+  const mxne = Number(stroops) / 10_000_000;
+  return mxne.toLocaleString("es-MX", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
+function fmtFecha(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleDateString("es-MX", { year: "numeric", month: "short", day: "numeric" });
+  } catch {
+    return "—";
+  }
 }
 
 // SVG icons
@@ -165,6 +190,15 @@ export default function DetalleProyecto({ direccion, onCerrar, onError, onToast 
   const [miAportacion,      setMiAportacion]      = useState(BigInt(0));
   const [miYield,           setMiYield]           = useState(BigInt(0));
   const [balanceMXNe,       setBalanceMXNe]       = useState(null);
+  const [impactData,        setImpactData]        = useState(null);
+  const [evidencia,         setEvidencia]         = useState([]);
+  const [cargandoImpacto,   setCargandoImpacto]   = useState(false);
+  const [evidenciaUpload,   setEvidenciaUpload]   = useState(null);
+  const [evidenciaTitulo,   setEvidenciaTitulo]   = useState("");
+  const [evidenciaTipo,     setEvidenciaTipo]     = useState("foto");
+  const [subiendoEvidencia, setSubiendoEvidencia]  = useState(false);
+
+  const esAdmin = direccion === ADMIN_ADDRESS;
 
   const throttleContribuir = useRef(crearThrottle(3000)).current;
   const throttleRetirar    = useRef(crearThrottle(3000)).current;
@@ -247,6 +281,45 @@ export default function DetalleProyecto({ direccion, onCerrar, onError, onToast 
   }, [proyectoId, direccion, onError, onCerrar, t]);
 
   useEffect(() => { refrescar(); }, [refrescar]);
+
+  // Fetch impact data when project is Liberado
+  useEffect(() => {
+    if (estado !== "Liberado") return;
+    let cancel = false;
+    setCargandoImpacto(true);
+    async function cargar() {
+      try {
+        const res = await fetch(`${API_URL}/impacto`);
+        if (cancel) return;
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancel) return;
+        const match = data.find(p => p.id === proyectoId);
+        if (match) setImpactData(match);
+      } catch {
+        // silent
+      } finally {
+        if (!cancel) setCargandoImpacto(false);
+      }
+    }
+    cargar();
+    return () => { cancel = true; };
+  }, [estado, proyectoId]);
+
+  // Fetch evidence for this project
+  useEffect(() => {
+    if (!supabase || !proyectoId) return;
+    let cancel = false;
+    supabase
+      .from("proyecto_evidencia")
+      .select("*")
+      .eq("proyecto_id", proyectoId)
+      .order("uploaded_at", { ascending: false })
+      .then(({ data }) => {
+        if (!cancel && data) setEvidencia(data);
+      });
+    return () => { cancel = true; };
+  }, [proyectoId, estado]);
 
   // Escape → volver
   useEffect(() => {
@@ -408,6 +481,37 @@ export default function DetalleProyecto({ direccion, onCerrar, onError, onToast 
     }
     setCargando(false);
   }, [direccion, onError, onToast, proyecto.id, refrescar, t]);
+
+  const manejarSubirEvidencia = useCallback(async () => {
+    if (!esAdmin || !evidenciaUpload || !evidenciaTitulo.trim() || !supabase) return;
+    setSubiendoEvidencia(true);
+    try {
+      const { valido, error: errVal } = validarArchivo(evidenciaUpload);
+      if (!valido) { onError?.(errVal); setSubiendoEvidencia(false); return; }
+      const cid = await subirAIPFS(evidenciaUpload);
+      const { error } = await supabase.from("proyecto_evidencia").insert({
+        proyecto_id: proyectoId,
+        tipo: evidenciaTipo,
+        titulo: evidenciaTitulo.trim(),
+        url: `https://ipfs.io/ipfs/${cid}`,
+        cid,
+      });
+      if (error) throw error;
+      onToast?.(t("impacto.evidenceAdded"));
+      setEvidenciaUpload(null);
+      setEvidenciaTitulo("");
+      // Refresh evidence
+      const { data } = await supabase
+        .from("proyecto_evidencia")
+        .select("*")
+        .eq("proyecto_id", proyectoId)
+        .order("uploaded_at", { ascending: false });
+      if (data) setEvidencia(data);
+    } catch (err) {
+      onError?.(err);
+    }
+    setSubiendoEvidencia(false);
+  }, [esAdmin, evidenciaUpload, evidenciaTitulo, evidenciaTipo, onError, onToast, proyectoId, supabase, t]);
 
   return (
     <>
@@ -854,6 +958,229 @@ export default function DetalleProyecto({ direccion, onCerrar, onError, onToast 
         </div>
       </div>
 
+      {/* ── Completion / Closure Section (Liberado with all capital returned) ── */}
+      {estado === "Liberado" && (cargandoImpacto || impactData) && (
+        <div className="completion-section" style={estilosComp.section}>
+          <div style={estilosComp.sectionInner}>
+
+            {/* Header */}
+            <div style={estilosComp.header}>
+              <div style={estilosComp.headerIcon}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+                </svg>
+              </div>
+              <div>
+                <h2 style={estilosComp.headerTitle}>{t("impacto.completionTitle")}</h2>
+                <p style={estilosComp.headerDesc}>{t("impacto.completionDesc")}</p>
+              </div>
+            </div>
+
+            {cargandoImpacto ? (
+              <div style={{ padding: "20px 0" }}>
+                <div className="skeleton" style={{ height: 16, width: "40%", marginBottom: 12 }} />
+                <div className="skeleton" style={{ height: 100, borderRadius: 8 }} />
+              </div>
+            ) : impactData ? (
+              <>
+                {/* Capital Return Banner */}
+                {impactData.porcentaje_devuelto >= 100 && (
+                  <div style={estilosComp.capitalBanner}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+                    </svg>
+                    <div>
+                      <strong style={{ fontSize: "1.05rem" }}>{t("impacto.capitalReturnTitle")}</strong>
+                      <p style={{ margin: "4px 0 0", opacity: 0.85, fontSize: "0.88rem" }}>{t("impacto.capitalReturnDesc")}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Final Metrics Grid */}
+                <div style={estilosComp.metricsGrid}>
+                  <div style={estilosComp.metricCard}>
+                    <div style={estilosComp.metricCardLabel}>{t("impacto.totalContributed")}</div>
+                    <div style={estilosComp.metricCardValue}>{fmtMXNe(impactData.total_contribuido)} MXNe</div>
+                  </div>
+                  <div style={estilosComp.metricCard}>
+                    <div style={estilosComp.metricCardLabel}>{t("impacto.contributors", { count: impactData.num_contribuidores, plural: "es" })}</div>
+                    <div style={estilosComp.metricCardValue}>{impactData.num_contribuidores}</div>
+                  </div>
+                  <div style={estilosComp.metricCard}>
+                    <div style={estilosComp.metricCardLabel}>{t("impacto.yieldGenerated")}</div>
+                    <div style={{ ...estilosComp.metricCardValue, color: "var(--green)" }}>+{fmtMXNe(impactData.yield_generado)} MXNe</div>
+                  </div>
+                  <div style={estilosComp.metricCard}>
+                    <div style={estilosComp.metricCardLabel}>{t("impacto.capitalReturned")}</div>
+                    <div style={{ ...estilosComp.metricCardValue, color: "var(--green)", fontWeight: 700 }}>
+                      {impactData.porcentaje_devuelto >= 100
+                        ? t("impacto.capitalReturnedFull")
+                        : t("impacto.capitalReturnedPct", { pct: impactData.porcentaje_devuelto })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Timeline */}
+                <div style={estilosComp.timelineSection}>
+                  <h3 style={estilosComp.timelineTitle}>{t("impacto.timeline")}</h3>
+                  <div style={estilosComp.timelineRow}>
+                    {[
+                      { key: "creacion", label: t("impacto.timelineCreated"), icon: "📅", field: impactData.timeline?.creacion },
+                      { key: "funding", label: t("impacto.timelineFunding"), icon: "💰", field: impactData.timeline?.primera_contribucion ? `${fmtFecha(impactData.timeline.primera_contribucion)} → ${fmtFecha(impactData.timeline.ultima_contribucion)}` : null },
+                      { key: "impact", label: t("impacto.timelineImpact"), icon: "🎯", field: impactData.timeline?.liberacion },
+                      { key: "return", label: t("impacto.timelineCapitalReturn"), icon: "🔄", field: impactData.timeline?.ultimo_retiro },
+                    ].map((step, i) => (
+                      <div key={step.key} style={estilosComp.timelineStep}>
+                        <div style={estilosComp.timelineDot}>
+                          <span style={{ fontSize: "1.1rem" }}>{step.icon}</span>
+                        </div>
+                        <div style={estilosComp.timelineContent}>
+                          <div style={estilosComp.timelineStepLabel}>{step.label}</div>
+                          <div style={estilosComp.timelineStepDate}>{step.field ? fmtFecha(step.field) : "—"}</div>
+                        </div>
+                        {i < 3 && <div style={estilosComp.timelineLine} />}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Transaction Verification */}
+                <div style={estilosComp.txSection}>
+                  <h3 style={estilosComp.txSectionTitle}>{t("impacto.metricsTitle")}</h3>
+                  <div style={estilosComp.txGrid}>
+                    {[
+                      { label: t("impacto.contributionTx"), txHashes: impactData.transacciones?.contribuciones ?? [], count: impactData.transacciones?.contribuciones?.length ?? 0 },
+                      { label: t("impacto.withdrawalTx"), txHashes: impactData.transacciones?.retiros ?? [], count: impactData.transacciones?.retiros?.length ?? 0 },
+                      { label: t("impacto.yieldTx"), txHashes: impactData.transacciones?.yield ?? [], count: impactData.transacciones?.yield?.length ?? 0 },
+                    ].filter(g => g.count > 0).map(group => (
+                      <div key={group.label} style={estilosComp.txCard}>
+                        <div style={estilosComp.txCardLabel}>
+                          {group.label}
+                          <span style={estilosComp.txCardCount}>{t("impacto.txCount", { count: group.count, plural: "es" })}</span>
+                        </div>
+                        <div style={estilosComp.txHashList}>
+                          {group.txHashes.slice(0, 5).map(hash => (
+                            <a
+                              key={hash}
+                              href={urlExplorer("tx", hash)}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={estilosComp.txHashLink}
+                              title={t("impacto.verifyExplorer")}
+                            >
+                              <code style={{ fontSize: "0.72rem" }}>{hash.slice(0, 16)}…</code>
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                              </svg>
+                            </a>
+                          ))}
+                          {group.txHashes.length > 5 && (
+                            <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                              +{group.txHashes.length - 5} más
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Evidence */}
+                <div style={estilosComp.evidenceSection}>
+                  <h3 style={estilosComp.txSectionTitle}>{t("impacto.evidenceTitle")}</h3>
+                  {evidencia.length === 0 ? (
+                    <p style={{ color: "var(--muted)", fontSize: "0.88rem", padding: "16px 0" }}>
+                      {t("impacto.evidenceEmpty")}
+                    </p>
+                  ) : (
+                    <div style={estilosComp.evidenceGrid}>
+                      {evidencia.map(e => (
+                        <div key={e.id} style={estilosComp.evidenceCard}>
+                          <div style={estilosComp.evidenceCardType}>
+                            {e.tipo === "foto" && "📷"}
+                            {e.tipo === "testimonio" && "💬"}
+                            {e.tipo === "reporte" && "📄"}
+                            {e.tipo === "completado" && "✅"}
+                            <span style={{ fontSize: "0.7rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
+                              {t(`impacto.evidence${e.tipo.charAt(0).toUpperCase() + e.tipo.slice(1)}`)}
+                            </span>
+                          </div>
+                          <div style={{ fontWeight: 600, fontSize: "0.88rem", marginBottom: 4 }}>{e.titulo}</div>
+                          {e.descripcion && <p style={{ fontSize: "0.82rem", color: "var(--muted)", margin: "0 0 8px" }}>{e.descripcion}</p>}
+                          <a
+                            href={e.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={estilosComp.evidenceLink}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                            </svg>
+                            {t("impacto.verifyExplorer")}
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Admin Evidence Upload */}
+                {esAdmin && (
+                  <div style={estilosComp.uploadSection}>
+                    <h3 style={estilosComp.txSectionTitle}>{t("impacto.uploadEvidence")}</h3>
+                    <div style={estilosComp.uploadForm}>
+                      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+                        <div style={{ flex: 1, minWidth: 200 }}>
+                          <label style={estilosComp.uploadLabel}>{t("impacto.uploadTitle")}</label>
+                          <input
+                            className="input"
+                            type="text"
+                            value={evidenciaTitulo}
+                            onChange={(e) => setEvidenciaTitulo(e.target.value)}
+                            placeholder="Ej. Foto del proyecto terminado"
+                            style={{ width: "100%", boxSizing: "border-box" }}
+                          />
+                        </div>
+                        <div>
+                          <label style={estilosComp.uploadLabel}>{t("impacto.uploadType")}</label>
+                          <select
+                            className="input"
+                            value={evidenciaTipo}
+                            onChange={(e) => setEvidenciaTipo(e.target.value)}
+                            style={{ padding: "8px 12px" }}
+                          >
+                            <option value="foto">{t("impacto.evidencePhoto")}</option>
+                            <option value="testimonio">{t("impacto.evidenceTestimonial")}</option>
+                            <option value="reporte">{t("impacto.evidenceReport")}</option>
+                            <option value="completado">{t("impacto.evidenceCompletion")}</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                        <input
+                          type="file"
+                          accept=".pdf,.png,.jpg,.jpeg"
+                          onChange={(e) => setEvidenciaUpload(e.target.files?.[0] ?? null)}
+                          style={{ fontSize: "0.82rem", flex: 1 }}
+                        />
+                        <button
+                          className="btn btn-primary"
+                          onClick={manejarSubirEvidencia}
+                          disabled={subiendoEvidencia || !evidenciaUpload || !evidenciaTitulo.trim()}
+                          style={{ justifyContent: "center" }}
+                        >
+                          {subiendoEvidencia ? t("impacto.uploading") : t("impacto.uploadSubmit")}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
+
       {mostrarQR && (
         <div
           role="dialog"
@@ -936,3 +1263,240 @@ export default function DetalleProyecto({ direccion, onCerrar, onError, onToast 
     </>
   );
 }
+
+const estilosComp = {
+  section: {
+    marginTop: 40,
+    borderTop: "1px solid var(--border)",
+    background: "var(--bg)",
+  },
+  sectionInner: {
+    maxWidth: 860,
+    margin: "0 auto",
+    padding: "32px 24px",
+  },
+  header: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 14,
+    marginBottom: 28,
+  },
+  headerIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: "50%",
+    background: "var(--green-dim)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  headerTitle: {
+    fontSize: "1.3rem",
+    fontWeight: 700,
+    color: "var(--text)",
+    margin: 0,
+  },
+  headerDesc: {
+    fontSize: "0.9rem",
+    color: "var(--muted)",
+    margin: "6px 0 0",
+    lineHeight: 1.5,
+  },
+  capitalBanner: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 14,
+    background: "var(--green-dim)",
+    border: "1.5px solid rgba(22,163,74,0.25)",
+    borderRadius: "var(--radius)",
+    padding: "20px 24px",
+    marginBottom: 24,
+    color: "var(--green)",
+  },
+  metricsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gap: 12,
+    marginBottom: 28,
+  },
+  metricCard: {
+    background: "var(--card)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-sm)",
+    padding: "16px 18px",
+  },
+  metricCardLabel: {
+    fontSize: "0.7rem",
+    color: "var(--muted)",
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    fontWeight: 600,
+    marginBottom: 6,
+  },
+  metricCardValue: {
+    fontFamily: "'SFMono-Regular','Consolas',monospace",
+    fontSize: "1rem",
+    fontWeight: 600,
+    color: "var(--text)",
+  },
+  timelineSection: {
+    marginBottom: 28,
+  },
+  timelineTitle: {
+    fontSize: "0.95rem",
+    fontWeight: 700,
+    color: "var(--text)",
+    marginBottom: 20,
+  },
+  timelineRow: {
+    display: "flex",
+    gap: 0,
+    overflowX: "auto",
+    paddingBottom: 8,
+  },
+  timelineStep: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    position: "relative",
+    minWidth: 140,
+    flex: 1,
+  },
+  timelineDot: {
+    width: 40,
+    height: 40,
+    borderRadius: "50%",
+    background: "var(--card)",
+    border: "2px solid var(--border)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+    zIndex: 1,
+  },
+  timelineLine: {
+    position: "absolute",
+    top: 20,
+    left: "50%",
+    width: "100%",
+    height: 2,
+    background: "var(--border)",
+    zIndex: 0,
+  },
+  timelineContent: {
+    textAlign: "center",
+  },
+  timelineStepLabel: {
+    fontSize: "0.75rem",
+    fontWeight: 600,
+    color: "var(--muted)",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+    marginBottom: 4,
+  },
+  timelineStepDate: {
+    fontSize: "0.78rem",
+    color: "var(--text)",
+    fontWeight: 500,
+  },
+  txSection: {
+    marginBottom: 28,
+  },
+  txSectionTitle: {
+    fontSize: "0.95rem",
+    fontWeight: 700,
+    color: "var(--text)",
+    marginBottom: 14,
+  },
+  txGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+    gap: 12,
+  },
+  txCard: {
+    background: "var(--card)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-sm)",
+    padding: "14px 16px",
+  },
+  txCardLabel: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    fontSize: "0.78rem",
+    fontWeight: 600,
+    color: "var(--text)",
+    marginBottom: 10,
+  },
+  txCardCount: {
+    fontSize: "0.7rem",
+    color: "var(--muted)",
+    background: "var(--bg)",
+    padding: "1px 7px",
+    borderRadius: 99,
+    fontWeight: 600,
+  },
+  txHashList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  txHashLink: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    color: "var(--navy)",
+    textDecoration: "none",
+    fontSize: "0.82rem",
+    padding: "4px 0",
+  },
+  evidenceSection: {
+    marginBottom: 28,
+  },
+  evidenceGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+    gap: 12,
+  },
+  evidenceCard: {
+    background: "var(--card)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-sm)",
+    padding: "14px 16px",
+  },
+  evidenceCardType: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 8,
+  },
+  evidenceLink: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: "0.78rem",
+    color: "var(--navy)",
+    textDecoration: "none",
+    fontWeight: 500,
+    marginTop: 8,
+  },
+  uploadSection: {
+    background: "var(--navy-dim)",
+    border: "1px solid rgba(30,58,95,0.15)",
+    borderRadius: "var(--radius)",
+    padding: "20px 24px",
+  },
+  uploadForm: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+  },
+  uploadLabel: {
+    display: "block",
+    fontSize: "0.78rem",
+    fontWeight: 600,
+    color: "var(--text2)",
+    marginBottom: 4,
+  },
+};

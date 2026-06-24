@@ -223,6 +223,114 @@ async function route(req, res) {
     return json(res, 200, { data, count });
   }
 
+  // GET /impacto — Historical summary for completed/success projects
+  if (parts[0] === 'impacto' && !parts[1]) {
+    try {
+      const [proyectosRes, aportacionesRes, eventosRes] = await Promise.all([
+        supabase.from('proyectos').select('*').eq('estado', 'Liberado'),
+        supabase.from('aportaciones').select('*'),
+        supabase.from('eventos').select('tipo,data,tx_hash,ledger,timestamp')
+          .in('tipo', ['nueva_aportacion','retiro_principal','yield_reclamado'])
+          .order('ledger', { ascending: true }),
+      ]);
+      if (proyectosRes.error) return json(req, res, 500, { error: proyectosRes.error.message });
+
+      const proyectos = proyectosRes.data ?? [];
+      const aportaciones = aportacionesRes.data ?? [];
+      const eventos = eventosRes.data ?? [];
+
+      // Group aportaciones by proyecto_id
+      const aportMap = {};
+      for (const a of aportaciones) {
+        const pid = a.proyecto_id;
+        if (!aportMap[pid]) aportMap[pid] = [];
+        aportMap[pid].push(a);
+      }
+
+      // Group eventos by proyecto_id
+      const eventosMap = {};
+      for (const e of eventos) {
+        const data = e.data;
+        if (!Array.isArray(data) || data.length === 0) continue;
+        const pid = Number(data[0]);
+        if (isNaN(pid)) continue;
+        if (!eventosMap[pid]) eventosMap[pid] = [];
+        eventosMap[pid].push(e);
+      }
+
+      const completados = [];
+      for (const p of proyectos) {
+        const pAportaciones = aportMap[p.id] ?? [];
+        const pEventos = eventosMap[p.id] ?? [];
+
+        // Completed = all contributions withdrawn
+        const totalActivos = pAportaciones.filter(a => !a.retirado).length;
+        if (totalActivos > 0) continue;
+
+        // Aggregate
+        const totalContribuido = pAportaciones.reduce((s, a) => s + Number(a.monto ?? 0), 0);
+        const numContribuidores = pAportaciones.length;
+        const capitalDevuelto = pAportaciones
+          .filter(a => a.retirado)
+          .reduce((s, a) => s + Number(a.monto ?? 0), 0);
+        const porcentajeDevuelto = totalContribuido > 0
+          ? Math.round((capitalDevuelto / totalContribuido) * 100)
+          : 0;
+        const yieldGenerado = Number(p.yield_entregado ?? 0);
+
+        // Timeline milestones from eventos
+        const contribuciones = pEventos.filter(e => e.tipo === 'nueva_aportacion');
+        const retiros = pEventos.filter(e => e.tipo === 'retiro_principal');
+        const yieldEventos = pEventos.filter(e => e.tipo === 'yield_reclamado');
+
+        const timeline = {
+          creacion: p.created_at ?? null,
+          primera_contribucion: contribuciones.length > 0 ? contribuciones[0].timestamp : null,
+          ultima_contribucion: contribuciones.length > 0 ? contribuciones[contribuciones.length - 1].timestamp : null,
+          liberacion: null,
+          primer_retiro: retiros.length > 0 ? retiros[0].timestamp : null,
+          ultimo_retiro: retiros.length > 0 ? retiros[retiros.length - 1].timestamp : null,
+        };
+
+        // Find when meta was reached (Liberado) — use last contribucion timestamp as proxy
+        if (contribuciones.length > 0) {
+          timeline.liberacion = contribuciones[contribuciones.length - 1].timestamp;
+        }
+
+        const txHashes = {
+          contribuciones: contribuciones.map(e => e.tx_hash).filter(Boolean),
+          retiros: retiros.map(e => e.tx_hash).filter(Boolean),
+          yield: yieldEventos.map(e => e.tx_hash).filter(Boolean),
+        };
+
+        completados.push({
+          id: p.id,
+          nombre: p.nombre,
+          dueno: p.dueno,
+          meta: p.meta,
+          total_contribuido,
+          num_contribuidores,
+          yield_generado: yieldGenerado,
+          capital_devuelto,
+          porcentaje_devuelto,
+          timeline,
+          transacciones: txHashes,
+        });
+      }
+
+      // Sort by most recent first (by ultima_contribucion in timeline)
+      completados.sort((a, b) => {
+        const ta = a.timeline.ultima_contribucion ?? a.timeline.creacion ?? '';
+        const tb = b.timeline.ultima_contribucion ?? b.timeline.creacion ?? '';
+        return tb.localeCompare(ta);
+      });
+
+      return json(req, res, 200, completados);
+    } catch (e) {
+      return json(req, res, 500, { error: e.message });
+    }
+  }
+
   // GET /sse — Server-Sent Events stream
   if (parts[0] === 'sse' && !parts[1]) {
     setCorsHeaders(req, res);
